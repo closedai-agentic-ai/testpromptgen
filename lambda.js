@@ -9,9 +9,7 @@ const path = require("path");
 const AWS_REGION = "us-west-2";
 const MODEL_ID = "anthropic.claude-3-5-sonnet-20241022-v2:0";
 const KNOWLEDGE_BASE_ID = "ZEVRTT7CCF"; // Default Knowledge Base ID
-const DEFAULT_PROMPT = "Hi. What does task manager do?";
 
-// S3 Configuration
 const S3_BUCKET_NAME = "closedaioutput"; // Replace with your actual S3 bucket name
 
 const queryKnowledgeBase = async (requestData) => {
@@ -21,6 +19,7 @@ const queryKnowledgeBase = async (requestData) => {
     repository,
     pr_number,
     diff,
+    pr_description,
     knowledgeBaseId = KNOWLEDGE_BASE_ID,
     modelId = MODEL_ID,
     numberOfResults = 5,
@@ -30,15 +29,69 @@ const queryKnowledgeBase = async (requestData) => {
     topP = 0.9,
     includeMetadata = true,
   } = requestData;
-  console.log("requestData ", requestData);
+
   const s3Prefix = repository;
 
   const query = `
-  You are a helpful assistant that can answer questions about the codebase.
-  You are given a repository, a pull request number, and a diff.
-  You need to generate test cases that what can break because of these changes.
-  this is the repository: ${repository}
-  this is the diff: ${diff}
+  You are a QA automation assistant specialized in mobile app testing. Given the Git diff and PR description, your task is to generate detailed, step-by-step manual test cases in a structured and human-readable format suitable for mobile-mcp.
+
+Follow this structure and behavior:
+
+App: Always include the package identifier, e.g., App: com.example.todoapp.
+
+Test: Provide a concise but descriptive title of the test scenario (e.g., "Bug Fix Verification - Duplicate Todo Item Creation").
+
+Write each action and validation step as a clear, user-driven instruction.
+
+Include logical pauses like “Wait for screen to load” where needed.
+
+Include validation steps like counting elements, verifying text, checking visibility, etc.
+
+Use screenshots strategically to capture UI state before and after critical actions.
+
+Ensure the test case covers both the happy path and basic edge cases relevant to the code change.
+
+Use the PR title, description, and code diff to infer what functionality has changed or been added. Then generate a test scenario that verifies this change thoroughly.
+
+Here’s an example of your expected output format:
+App: com.example.todoapp  
+Test: Bug Fix Verification - Duplicate Todo Item Creation  
+
+Launch the todo app  
+Wait for the main screen to load  
+Count the current number of todo items  
+Take a screenshot of the initial state  
+Tap on the add task input field  
+Type 'Test task for bug verification'  
+Tap the add button  
+Wait for the task to be added  
+Count the number of todo items again  
+Verify that exactly 1 new item was added  
+Verify the new task shows 'Test task for bug verification'  
+Take a screenshot showing the single new item  
+Clear the input field  
+Type 'Second test task'  
+Tap the add button  
+Wait for the task to be added  
+Count the total number of todo items  
+Verify that exactly 1 more item was added  
+Verify both tasks are visible in the list  
+Take a screenshot of the final state  
+Mark the first task as completed  
+Verify only the first task shows as completed  
+Delete the second task  
+Verify the task is removed from the list  
+Take a final screenshot  
+Now, based on the following PR description and code diff, generate a test case in this exact format.
+
+[PR Title]
+${repository}
+
+[PR Description]
+${pr_description}
+
+[Git Diff]
+${diff}
   `;
 
   // Create a new Bedrock Agent Runtime client instance.
@@ -84,7 +137,6 @@ const queryKnowledgeBase = async (requestData) => {
 
     // Extract the generated response
     const generatedText = apiResponse.output.text;
-    console.log(`Response generated successfully`);
 
     // Create a timestamp for unique file naming
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -92,31 +144,7 @@ const queryKnowledgeBase = async (requestData) => {
     const filePath = `/tmp/${fileName}`; // Use /tmp directory in Lambda
 
     // Prepare file content with metadata
-    const fileContent = `
-=== Bedrock Knowledge Base Response ===
-Timestamp: ${new Date().toISOString()}
-Knowledge Base ID: ${knowledgeBaseId}
-Model: ${modelId}
-Query: ${query}
-Session ID: ${apiResponse.sessionId || "N/A"}
-Search Type: ${searchType}
-Number of Results: ${numberOfResults}
-Temperature: ${temperature}
-Max Tokens: ${maxTokens}
-git diff: ${diff}
-repository: ${repository}
-pr_number: ${pr_number}
-
-=== Generated Response ===
-${generatedText}
-
-=== Request Parameters ===
-${includeMetadata ? JSON.stringify(requestData, null, 2) : "Metadata excluded"}
-
-=== Additional Information ===
-Response generated using AWS Bedrock Knowledge Base integration
-Processed at: ${new Date().toISOString()}
-`;
+    const fileContent = generatedText;
 
     // Write the response to a local file
     fs.writeFileSync(filePath, fileContent, "utf8");
@@ -150,14 +178,7 @@ Processed at: ${new Date().toISOString()}
     console.log(`Local file cleaned up: ${filePath}`);
 
     return {
-      generatedText,
       s3Location: `s3://${S3_BUCKET_NAME}/${s3Key}`,
-      sessionId: apiResponse.sessionId,
-      fileName: fileName,
-      query: query,
-      knowledgeBaseId: knowledgeBaseId,
-      modelId: modelId,
-      requestParameters: requestData,
     };
   } catch (error) {
     console.error("Error querying knowledge base:", error);
