@@ -3,6 +3,7 @@ const {
   RetrieveAndGenerateCommand,
 } = require("@aws-sdk/client-bedrock-agent-runtime");
 const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
+const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 const fs = require("fs");
 const path = require("path");
 
@@ -18,7 +19,10 @@ const queryKnowledgeBase = async (requestData) => {
   const {
     repository,
     pr_number,
+    repositoryUrl,
+    commitSha,
     diff,
+    branch,
     pr_description,
     knowledgeBaseId = KNOWLEDGE_BASE_ID,
     modelId = MODEL_ID,
@@ -37,24 +41,19 @@ const queryKnowledgeBase = async (requestData) => {
 
 Follow this structure and behavior:
 
-App: Always include the package identifier, e.g., App: com.example.todoapp.
+App: Always include the package identifier, e.g., App: com.qazi9amaan.rntodoapp.
 
 Test: Provide a concise but descriptive title of the test scenario (e.g., "Bug Fix Verification - Duplicate Todo Item Creation").
 
 Write each action and validation step as a clear, user-driven instruction.
-
-Include logical pauses like “Wait for screen to load” where needed.
-
+Include logical pauses like "Wait for screen to load" where needed.
 Include validation steps like counting elements, verifying text, checking visibility, etc.
-
 Use screenshots strategically to capture UI state before and after critical actions.
-
 Ensure the test case covers both the happy path and basic edge cases relevant to the code change.
-
 Use the PR title, description, and code diff to infer what functionality has changed or been added. Then generate a test scenario that verifies this change thoroughly.
 
-Here’s an example of your expected output format:
-App: com.example.todoapp  
+Here's an example of your expected output format:
+App: com.qazi9amaan.rntodoapp  
 Test: Bug Fix Verification - Duplicate Todo Item Creation  
 
 Launch the todo app  
@@ -82,7 +81,7 @@ Verify only the first task shows as completed
 Delete the second task  
 Verify the task is removed from the list  
 Take a final screenshot  
-Now, based on the following PR description and code diff, generate a test case in this exact format.
+Now, based on the following PR description and code diff, generate a test case in this exact format with minimum 20 test cases.
 
 [PR Title]
 ${repository}
@@ -140,7 +139,7 @@ ${diff}
 
     // Create a timestamp for unique file naming
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const fileName = `bedrock-response-${timestamp}.txt`;
+    const fileName = `testcases-${pr_number}-${timestamp}.txt`;
     const filePath = `/tmp/${fileName}`; // Use /tmp directory in Lambda
 
     // Prepare file content with metadata
@@ -151,7 +150,7 @@ ${diff}
     console.log(`Response written to local file: ${filePath}`);
 
     // Upload file to S3
-    const s3Key = `${s3Prefix}/${pr_number}/${fileName}`;
+    const s3Key = `${s3Prefix}/${fileName}`;
     const uploadParams = {
       Bucket: S3_BUCKET_NAME,
       Key: s3Key,
@@ -161,24 +160,40 @@ ${diff}
         "knowledge-base-id": knowledgeBaseId,
         "model-id": modelId,
         "session-id": apiResponse.sessionId || "none",
-        "query-hash": Buffer.from(query).toString("base64").substring(0, 50),
         "search-type": searchType,
         timestamp: timestamp,
       },
     };
 
-    const uploadResult = await s3Client.send(
-      new PutObjectCommand(uploadParams)
+    await s3Client.send(new PutObjectCommand(uploadParams));
+
+    // Generate a pre-signed URL for the uploaded file (valid for 1 hour)
+    const presignedUrl = await getSignedUrl(
+      s3Client,
+      new PutObjectCommand({
+        Bucket: S3_BUCKET_NAME,
+        Key: s3Key,
+      }),
+      { expiresIn: 86400 }
     );
-    console.log(`File uploaded to S3: s3://${S3_BUCKET_NAME}/${s3Key}`);
-    console.log(`Upload ETag: ${uploadResult.ETag}`);
 
     // Clean up local file
     fs.unlinkSync(filePath);
     console.log(`Local file cleaned up: ${filePath}`);
 
     return {
-      s3Location: `s3://${S3_BUCKET_NAME}/${s3Key}`,
+      appPackage: "com.qazi9amaan.rntodoapp",
+      testName: `Test for PR ${pr_number}`,
+      testInstructionsUrl: presignedUrl,
+      priority: "high",
+      timeout: 180,
+      metadata: {
+        jiraTicketId: "PROJ-1234",
+        commitSha: commitSha,
+        repositoryUrl: repositoryUrl,
+        prNumber: pr_number,
+        branch: branch,
+      },
     };
   } catch (error) {
     console.error("Error querying knowledge base:", error);
@@ -227,17 +242,7 @@ exports.handler = async function (event) {
         "Access-Control-Allow-Headers": "Content-Type",
         "Access-Control-Allow-Methods": "POST, OPTIONS",
       },
-      body: JSON.stringify({
-        message: "Knowledge base query completed successfully",
-        s3Location: result.s3Location,
-        fileName: result.fileName,
-        sessionId: result.sessionId,
-        query: result.query,
-        knowledgeBaseId: result.knowledgeBaseId,
-        modelId: result.modelId,
-        responsePreview: result.generatedText.substring(0, 200) + "...",
-        requestParameters: result.requestParameters,
-      }),
+      body: result,
     };
   } catch (error) {
     console.error("Lambda execution failed:", error);
